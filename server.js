@@ -11,7 +11,6 @@ const cors = require('cors');
 const helmet = require('helmet'); // For security headers
 const { createClient } = require('@supabase/supabase-js');
 const fetch = require('node-fetch'); // Use node-fetch v2 for CommonJS compatibility
-const { sendHubtelSMS } = require('./utils/sms');
 
 // --- Configuration (Loaded from .env file) ---
 const supabaseUrl = process.env.SUPABASE_URL;
@@ -108,103 +107,8 @@ app.use((err, req, res, next) => {
     res.status(500).json({ ok: false, error: 'Internal Server Error' });
 });
 
-// --- Supabase Realtime Listener for Reservation Status Changes ---
-function setupReservationStatusListener() {
-    console.log('[Realtime] Setting up Supabase Realtime listener for reservations...');
-
-    const channel = supabase
-        .channel('reservation-status-changes')
-        .on(
-            'postgres_changes',
-            {
-                event: 'UPDATE',
-                schema: 'public',
-                table: 'reservations'
-            },
-            async (payload) => {
-                console.log('[Realtime] Reservation update detected:', payload.new.id);
-
-                try {
-                    const oldStatus = payload.old?.status || null;
-                    const newStatus = payload.new?.status || null;
-                    const phoneNumber = payload.new?.phone || null;
-
-                    // Only send SMS for specific status changes
-                    const statusMessages = {
-                        'confirmed': 'Your reservation has been confirmed. We look forward to serving you!',
-                        'completed': 'Your reservation has been completed. Thank you for choosing us!',
-                        'cancelled': 'Your reservation has been cancelled. If this was not you, please contact us.'
-                    };
-
-                    // Normalize status to lowercase for comparison
-                    const normalizedNewStatus = newStatus?.toLowerCase()?.trim();
-                    
-                    // Skip if new status is not one we track
-                    if (!normalizedNewStatus || !statusMessages[normalizedNewStatus]) {
-                        console.log(`[Realtime] Status "${newStatus}" does not require SMS notification.`);
-                        return;
-                    }
-
-                    // Only process if status actually changed (skip if unchanged)
-                    // Note: oldStatus might be null if not provided by Supabase, which is acceptable
-                    const normalizedOldStatus = oldStatus?.toLowerCase()?.trim();
-                    if (normalizedOldStatus === normalizedNewStatus) {
-                        console.log(`[Realtime] Status unchanged for reservation ${payload.new.id} (${normalizedNewStatus}), skipping SMS.`);
-                        return;
-                    }
-
-                    // Validate phone number
-                    if (!phoneNumber || typeof phoneNumber !== 'string' || phoneNumber.trim().length === 0) {
-                        console.warn(`[Realtime] No valid phone number found for reservation ${payload.new.id}, cannot send SMS.`);
-                        return;
-                    }
-
-                    // Send SMS notification
-                    const message = statusMessages[normalizedNewStatus];
-                    console.log(`[Realtime] Sending SMS to ${phoneNumber} for reservation ${payload.new.id} (status: ${newStatus} -> ${normalizedNewStatus})`);
-                    
-                    const smsResult = await sendHubtelSMS(phoneNumber, message);
-                    
-                    if (smsResult.success) {
-                        console.log(`[Realtime] ✓ SMS sent successfully to ${phoneNumber} for reservation ${payload.new.id}`);
-                    } else {
-                        console.error(`[Realtime] ✗ Failed to send SMS to ${phoneNumber} for reservation ${payload.new.id}:`, smsResult.error);
-                        // Note: We don't throw here to avoid crashing the server
-                    }
-
-                } catch (error) {
-                    // Log error but don't crash the server
-                    console.error(`[Realtime] Error processing reservation status change for reservation ${payload.new?.id}:`, error);
-                }
-            }
-        )
-        .subscribe((status) => {
-            if (status === 'SUBSCRIBED') {
-                console.log('[Realtime] ✓ Successfully subscribed to reservation status changes');
-            } else if (status === 'CHANNEL_ERROR') {
-                console.error('[Realtime] ✗ Error subscribing to reservation status changes');
-            } else {
-                console.log(`[Realtime] Subscription status: ${status}`);
-            }
-        });
-
-    return channel;
-}
-
 // --- Server Start ---
 app.listen(port, () => {
     // This log is helpful for confirming the server started in Render's logs.
     console.log(`Server listening on port ${port}`);
-    
-    // Setup Realtime listener after server starts
-    if (supabaseUrl && supabaseServiceKey) {
-        try {
-            setupReservationStatusListener();
-        } catch (error) {
-            console.error('[Realtime] Failed to setup reservation status listener:', error);
-            // Don't crash the server if Realtime setup fails
-        }
-    } else {
-        console.warn('[Realtime] Supabase credentials not configured, skipping Realtime listener setup.');
-    }
 });
